@@ -16,7 +16,6 @@ platform :ios do
     UI.user_error!("Missing APP_STORE_CONNECT_API_KEY_B64") if raw_key.empty?
     UI.user_error!("Missing APPLE_TEAM_ID") if team_id.empty?
 
-    # Support either raw .p8 contents or base64-encoded .p8
     is_b64 = !raw_key.include?("BEGIN PRIVATE KEY")
 
     api_key = app_store_connect_api_key(
@@ -27,7 +26,6 @@ platform :ios do
       in_house: false
     )
 
-    # Create temporary keychain on the GitHub Actions macOS runner
     keychain_name = "ci_signing.keychain-db"
     keychain_password = "ci_temp_password_123"
     keychain_path = File.expand_path("~/Library/Keychains/#{keychain_name}")
@@ -41,19 +39,40 @@ platform :ios do
       lock_when_sleeps: false
     )
 
+    matched_cert_id = nil
     p12_b64 = ENV["APPLE_DIST_CERT_P12_B64"].to_s.strip
     if !p12_b64.empty?
       p12_path = File.expand_path("../build/dist_cert.p12", __dir__)
+      pem_path = File.expand_path("../build/dist_bundle.pem", __dir__)
+      pass_arg = ENV["APPLE_DIST_CERT_PASSWORD"].to_s
       FileUtils.mkdir_p(File.dirname(p12_path))
       File.binwrite(p12_path, Base64.decode64(p12_b64))
+
+      # Re-export .p12 using macOS native LibreSSL for 100% Keychain compatibility
+      if system("openssl pkcs12 -in '#{p12_path}' -nodes -passin 'pass:#{pass_arg}' -out '#{pem_path}' 2>/dev/null")
+        system("/usr/bin/openssl pkcs12 -export -in '#{pem_path}' -out '#{p12_path}' -passout 'pass:#{pass_arg}'")
+        File.delete(pem_path) if File.exist?(pem_path)
+      end
+
+      # Extract certificate serial to match exact cert_id in App Store Connect
+      cert_serial = `openssl pkcs12 -in '#{p12_path}' -clcerts -nokeys -passin 'pass:#{pass_arg}' 2>/dev/null | openssl x509 -noout -serial`.strip.sub('serial=', '').upcase.sub(/^0+/, '')
+      UI.message("Imported .p12 certificate serial: #{cert_serial}")
+
       import_certificate(
         certificate_path: p12_path,
-        certificate_password: ENV["APPLE_DIST_CERT_PASSWORD"].to_s,
+        certificate_password: pass_arg,
         keychain_name: keychain_name,
         keychain_password: keychain_password
       )
+
+      if !cert_serial.empty?
+        matched = Spaceship::ConnectAPI::Certificate.all(filter: { certificateType: "IOS_DISTRIBUTION,DISTRIBUTION" }).find do |c|
+          c.serial_number.to_s.upcase.sub(/^0+/, '') == cert_serial
+        end
+        matched_cert_id = matched&.id
+        UI.message("Matched App Store Connect cert_id: #{matched_cert_id}") if matched_cert_id
+      end
     else
-      # Automatically create/fetch an Apple Distribution Certificate via App Store Connect API
       cert(
         api_key: api_key,
         team_id: team_id,
@@ -64,19 +83,20 @@ platform :ios do
       )
     end
 
-    # Fetch or create App Store Distribution Provisioning Profile
-    sigh(
+    # Fetch or create App Store Distribution Provisioning Profile for in.driverhub.app
+    sigh_opts = {
       api_key: api_key,
       app_identifier: "in.driverhub.app",
       team_id: team_id,
       readonly: false,
       output_path: File.expand_path("../build/profiles", __dir__)
-    )
+    }
+    sigh_opts[:cert_id] = matched_cert_id if matched_cert_id
+    sigh(sigh_opts)
 
     profile_name = Actions.lane_context[SharedValues::SIGH_NAME]
     profile_uuid = Actions.lane_context[SharedValues::SIGH_UUID]
 
-    # Configure manual signing for Release build
     update_code_signing_settings(
       use_automatic_signing: false,
       path: "App.xcodeproj",
@@ -88,14 +108,12 @@ platform :ios do
       targets: ["App"]
     )
 
-    # Use GitHub Run Number so every build number is strictly increasing for TestFlight
     build_num = (ENV["GITHUB_RUN_NUMBER"] || Time.now.strftime("%Y%m%d%H%M")).to_i
     increment_build_number(
       build_number: build_num.to_s,
       xcodeproj: "App.xcodeproj"
     )
 
-    # Archive and export signed App Store IPA
     ipa_dir = File.expand_path("../build", __dir__)
     build_app(
       workspace: "App.xcworkspace",
@@ -114,9 +132,10 @@ platform :ios do
       }
     )
 
-    # Upload directly to Apple TestFlight
     upload_to_testflight(
       api_key: api_key,
+      apple_id: "6839527998",
+      app_identifier: "in.driverhub.app",
       ipa: File.join(ipa_dir, "DriverHub.ipa"),
       skip_waiting_for_build_processing: true
     )
