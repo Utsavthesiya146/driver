@@ -37,9 +37,12 @@ jobs:
           npx cap sync android
 
       - name: Decode Release Keystore (if configured in Secrets)
-        if: ${{ secrets.ANDROID_KEYSTORE_B64 != '' }}
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 --decode > android/app/driverhub-release.jks
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 --decode > android/app/driverhub-release.jks
+          fi
 
       - name: Build APK and AAB
         env:
