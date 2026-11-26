@@ -1,0 +1,32 @@
+{
+  "appId": "in.driverhub.app",
+  "appName": "Driver Hub",
+  "webDir": "www",
+  "server": {
+    "url": "https://driverhub.in",
+    "cleartext": false,
+    "androidScheme": "https",
+    "allowNavigation": [
+      "driverhub.in",
+      "*.driverhub.in",
+      "*.google.com",
+      "*.googleapis.com",
+      "*.supabase.co"
+    ]
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1500,
+      "launchAutoHide": true,
+      "backgroundColor": "#08233F",
+      "androidSplashResourceName": "splash",
+      "androidScaleType": "CENTER_CROP",
+      "showSpinner": false
+    },
+    "StatusBar": {
+      "overlaysWebView": false,
+      "style": "DARK",
+      "backgroundColor": "#08233F"
+    }
+  }
+}

@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Capacitor generated / local build outputs
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/capacitor-cordova-android-plugins/build/
+
+ios/App/Pods/
+ios/App/build/
+ios/App/DerivedData/
+*.xcarchive
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Sensitive Signing Keys & Certificates (NEVER commit to public repo!)
+*.jks
+*.keystore
+*.p12
+*.p8
+*.cer
+*.pem
+*.key
+*.mobileprovision
+release-builds/
+
+# Temporary / OS files
+.DS_Store
+Thumbs.db
+*.log
+generate_assets.ps1

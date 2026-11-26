@@ -1,0 +1,124 @@
+require 'base64'
+require 'fileutils'
+
+default_platform(:ios)
+
+platform :ios do
+  desc "Build, Sign, and Upload Driver Hub directly to Apple TestFlight"
+  lane :testflight_release do
+    key_id = ENV["APP_STORE_CONNECT_KEY_ID"].to_s.strip
+    issuer_id = ENV["APP_STORE_CONNECT_ISSUER_ID"].to_s.strip
+    raw_key = ENV["APP_STORE_CONNECT_API_KEY_B64"].to_s.strip
+    team_id = ENV["APPLE_TEAM_ID"].to_s.strip
+
+    UI.user_error!("Missing APP_STORE_CONNECT_KEY_ID") if key_id.empty?
+    UI.user_error!("Missing APP_STORE_CONNECT_ISSUER_ID") if issuer_id.empty?
+    UI.user_error!("Missing APP_STORE_CONNECT_API_KEY_B64") if raw_key.empty?
+    UI.user_error!("Missing APPLE_TEAM_ID") if team_id.empty?
+
+    # Support either raw .p8 contents or base64-encoded .p8
+    is_b64 = !raw_key.include?("BEGIN PRIVATE KEY")
+
+    api_key = app_store_connect_api_key(
+      key_id: key_id,
+      issuer_id: issuer_id,
+      key_content: raw_key,
+      is_key_content_base64: is_b64,
+      in_house: false
+    )
+
+    # Create temporary keychain on the GitHub Actions macOS runner
+    keychain_name = "ci_signing.keychain-db"
+    keychain_password = "ci_temp_password_123"
+    keychain_path = File.expand_path("~/Library/Keychains/#{keychain_name}")
+
+    create_keychain(
+      name: keychain_name,
+      password: keychain_password,
+      default_keychain: true,
+      unlock: true,
+      timeout: 3600,
+      lock_when_sleeps: false
+    )
+
+    p12_b64 = ENV["APPLE_DIST_CERT_P12_B64"].to_s.strip
+    if !p12_b64.empty?
+      p12_path = File.expand_path("../build/dist_cert.p12", __dir__)
+      FileUtils.mkdir_p(File.dirname(p12_path))
+      File.binwrite(p12_path, Base64.decode64(p12_b64))
+      import_certificate(
+        certificate_path: p12_path,
+        certificate_password: ENV["APPLE_DIST_CERT_PASSWORD"].to_s,
+        keychain_name: keychain_name,
+        keychain_password: keychain_password
+      )
+    else
+      # Automatically create/fetch an Apple Distribution Certificate via App Store Connect API
+      cert(
+        api_key: api_key,
+        team_id: team_id,
+        development: false,
+        keychain_path: keychain_path,
+        keychain_password: keychain_password,
+        output_path: File.expand_path("../build/certs", __dir__)
+      )
+    end
+
+    # Fetch or create App Store Distribution Provisioning Profile
+    sigh(
+      api_key: api_key,
+      app_identifier: "in.driverhub.app",
+      team_id: team_id,
+      readonly: false,
+      output_path: File.expand_path("../build/profiles", __dir__)
+    )
+
+    profile_name = Actions.lane_context[SharedValues::SIGH_NAME]
+    profile_uuid = Actions.lane_context[SharedValues::SIGH_UUID]
+
+    # Configure manual signing for Release build
+    update_code_signing_settings(
+      use_automatic_signing: false,
+      path: "App.xcodeproj",
+      team_id: team_id,
+      bundle_identifier: "in.driverhub.app",
+      code_sign_identity: "Apple Distribution",
+      profile_name: profile_name,
+      profile_uuid: profile_uuid,
+      targets: ["App"]
+    )
+
+    # Use GitHub Run Number so every build number is strictly increasing for TestFlight
+    build_num = (ENV["GITHUB_RUN_NUMBER"] || Time.now.strftime("%Y%m%d%H%M")).to_i
+    increment_build_number(
+      build_number: build_num.to_s,
+      xcodeproj: "App.xcodeproj"
+    )
+
+    # Archive and export signed App Store IPA
+    ipa_dir = File.expand_path("../build", __dir__)
+    build_app(
+      workspace: "App.xcworkspace",
+      scheme: "App",
+      configuration: "Release",
+      export_method: "app-store",
+      output_directory: ipa_dir,
+      output_name: "DriverHub.ipa",
+      clean: true,
+      export_options: {
+        signingStyle: "manual",
+        teamID: team_id,
+        provisioningProfiles: {
+          "in.driverhub.app" => profile_name
+        }
+      }
+    )
+
+    # Upload directly to Apple TestFlight
+    upload_to_testflight(
+      api_key: api_key,
+      ipa: File.join(ipa_dir, "DriverHub.ipa"),
+      skip_waiting_for_build_processing: true
+    )
+  end
+end

@@ -1,0 +1,113 @@
+name: Build iOS & Upload to TestFlight
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build_ios:
+    name: Build iOS App & Upload to TestFlight
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install NPM Dependencies
+        run: |
+          npm ci || npm install
+
+      - name: Sync Capacitor iOS
+        run: |
+          npx cap sync ios
+
+      - name: Install CocoaPods Dependencies
+        run: |
+          cd ios/App
+          pod install --repo-update || pod install
+
+      - name: Check TestFlight Secrets
+        id: check_secrets
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_B64 }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$KEY_ID" ] && [ -n "$ISSUER_ID" ] && [ -n "$API_KEY" ] && [ -n "$TEAM_ID" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build, Sign & Upload Directly to TestFlight
+        if: steps.check_secrets.outputs.ready == 'true'
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY_B64: ${{ secrets.APP_STORE_CONNECT_API_KEY_B64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_DIST_CERT_P12_B64: ${{ secrets.APPLE_DIST_CERT_P12_B64 }}
+          APPLE_DIST_CERT_PASSWORD: ${{ secrets.APPLE_DIST_CERT_PASSWORD }}
+        run: |
+          cd ios/App
+          if ! command -v fastlane &> /dev/null; then
+            gem install fastlane -N
+          fi
+          fastlane testflight_release
+
+      - name: Upload Signed IPA Artifact
+        if: steps.check_secrets.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DriverHub-iOS-Signed-IPA
+          path: ios/App/build/DriverHub.ipa
+
+      - name: Build Unsigned Verification IPA (When Apple Secrets Not Yet Added)
+        if: steps.check_secrets.outputs.ready != 'true'
+        run: |
+          cd ios/App
+          xcodebuild -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/App.xcarchive \
+            archive \
+            CODE_SIGNING_ALLOWED=NO
+          mkdir -p build/Payload
+          cp -r build/App.xcarchive/Products/Applications/App.app build/Payload/
+          cd build
+          zip -r DriverHub-iOS-unsigned.ipa Payload
+
+      - name: Upload Unsigned IPA Artifact
+        if: steps.check_secrets.outputs.ready != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DriverHub-iOS-Unsigned-IPA
+          path: ios/App/build/DriverHub-iOS-unsigned.ipa
+
+      - name: Print TestFlight Setup Instructions
+        if: steps.check_secrets.outputs.ready != 'true'
+        run: |
+          {
+            echo "## iOS Build Succeeded (Verification Only)"
+            echo ""
+            echo "Xcode compilation & CocoaPods succeeded! To enable **direct automatic upload to TestFlight**, add these GitHub Secrets in **Settings -> Secrets and variables -> Actions**:"
+            echo ""
+            echo "| Secret Name | Value |"
+            echo "|---|---|"
+            echo "| \`APP_STORE_CONNECT_KEY_ID\` | Your App Store Connect API Key ID |"
+            echo "| \`APP_STORE_CONNECT_ISSUER_ID\` | Your App Store Connect Issuer ID |"
+            echo "| \`APP_STORE_CONNECT_API_KEY_B64\` | Contents (or Base64) of your \`.p8\` API Key file |"
+            echo "| \`APPLE_TEAM_ID\` | Your 10-character Apple Developer Team ID |"
+            echo "| \`APPLE_DIST_CERT_P12_B64\` | *(Optional after 1st run)* Base64 of Apple Distribution \`.p12\` |"
+            echo "| \`APPLE_DIST_CERT_PASSWORD\` | *(Optional)* Password for the \`.p12\` |"
+            echo ""
+            echo "After adding the secrets, click **Run workflow** on this workflow to upload straight to TestFlight!"
+          } >> "$GITHUB_STEP_SUMMARY"
